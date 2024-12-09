@@ -1,0 +1,166 @@
+---
+title: "Shopping Behavior Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r,message=FALSE,warning=FALSE,echo=FALSE}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(recommenderlab)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(DT)
+
+# Load datasets
+behavior_data <- read.csv("C:/Users/harik/Downloads/shopping_behavior_updated.csv")
+trends_data <- read.csv("C:/Users/harik/Downloads/shopping_trends.csv")
+
+# Merge datasets by Customer ID
+combined_data <- merge(behavior_data, trends_data, by = "Customer.ID", all = TRUE) %>%
+  select(Customer.ID, 
+         Gender = Gender.x,  # Include Gender column
+         Item.Purchased = Item.Purchased.x, 
+         Category = Category.x, 
+         Size = Size.x, 
+         Color = Color.x, 
+         Season = Season.x) %>%
+  mutate(Product.Features = paste(Category, Color, Size, Season, sep = " "))
+
+# Create the rating data
+rating_data <- combined_data %>%
+  group_by(Customer.ID, Item.Purchased) %>%
+  summarise(rating = n(), .groups = 'drop')  # Counting the number of purchases
+
+# Relax the filtering criteria if needed (to avoid removing all entries)
+rating_data_filtered <- rating_data %>% 
+  filter(rating > 0)  # Keep rows with at least 1 purchase
+
+# Create the rating matrix with valid data
+rating_matrix <- rating_data_filtered %>%
+  pivot_wider(names_from = Item.Purchased, values_from = rating, values_fill = 0)
+
+# Convert to matrix format
+rating_matrix <- as.matrix(rating_matrix[, -1])  # Exclude Customer.ID column
+rownames(rating_matrix) <- rating_data_filtered$Customer.ID  # Set row names as Customer IDs
+
+# Convert to realRatingMatrix class
+rating_matrix <- as(rating_matrix, "realRatingMatrix")
+
+# Define goodRating threshold (e.g., ratings >= 1 are considered good)
+good_rating_threshold <- 1  # You can adjust this based on your criteria
+
+# Create an evaluation scheme, specifying goodRating for UBCF
+train_test_split <- evaluationScheme(rating_matrix, method = "split", train = 0.8, given = 1, goodRating = good_rating_threshold)
+
+# Run the evaluation
+evaluation_results <- evaluate(train_test_split, method = "UBCF", n = c(1, 5, 10))
+
+# Check available metrics in evaluation_results
+cat("Available Metrics in Evaluation Results:\n")
+print(evaluation_results@results)
+
+# If RMSE or MAE are found, extract and print them
+if ("RMSE" %in% colnames(evaluation_results@results)) {
+  rmse <- evaluation_results@results$RMSE
+  mae <- evaluation_results@results$MAE
+  
+  # Print RMSE and MAE for each n
+  cat("\nRMSE and MAE metrics for different 'n' values:\n")
+  rmse_mae_table <- data.frame(n = c(1, 5, 10), RMSE = rmse, MAE = mae)
+  print(rmse_mae_table)
+  
+} else {
+  cat("\nNo RMSE or MAE metrics found in the evaluation results.\n")
+}
+
+# **1. Popular Items Purchased (Table)**
+popular_items <- combined_data %>%
+  group_by(Item.Purchased) %>%
+  summarise(Purchase.Count = n(), .groups = 'drop') %>%
+  arrange(desc(Purchase.Count))
+
+kable(popular_items, caption = "Popular Items Purchased")
+
+# **2. Seasonal Purchases (Table)**
+seasonal_data <- combined_data %>%
+  group_by(Season) %>%
+  summarise(Purchase.Count = n(), .groups = 'drop')
+
+kable(seasonal_data, caption = "Seasonal Purchases") %>%
+  kable_styling(full_width = F, position = "center") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#0073e6") %>%
+  column_spec(2, color = "red", background = "lightgray") %>%
+  add_header_above(c("Purchase Info" = 2))
+
+# **3. Customer Distribution by Gender (Pie Chart)**
+gender_data <- combined_data %>%
+  group_by(Gender = ifelse(is.na(Gender), "Unknown", Gender)) %>%
+  summarise(Purchase.Count = n(), .groups = 'drop') %>%
+  mutate(Percentage = round((Purchase.Count / sum(Purchase.Count)) * 100, 1))
+
+# Pie Chart
+ggplot(gender_data, aes(x = "", y = Purchase.Count, fill = Gender)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  labs(title = "Customer Distribution by Gender", x = NULL, y = NULL) +
+  theme_void() +
+  theme(legend.position = "right") +
+  scale_fill_brewer(palette = "Set3") +
+  geom_text(aes(label = paste0(Gender, ": ", Percentage, "%")), position = position_stack(vjust = 0.5), size = 5)
+
+# **4. Category-wise Purchases (Table & Graph)**
+category_purchase_data <- combined_data %>%
+  group_by(Category) %>%
+  summarise(Purchase.Count = n(), .groups = 'drop')
+
+kable(category_purchase_data, caption = "Category-wise Purchase Count")
+
+ggplot(category_purchase_data, aes(x = reorder(Category, -Purchase.Count), y = Purchase.Count, fill = Category)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Category-wise Purchase Count", x = "Category", y = "Purchase Count") +
+  theme_minimal() +
+  coord_flip()
+
+# **5. Visualizing RMSE and MAE for Different n Values (Bar Graph)**
+if (exists("rmse_mae_table")) {
+  rmse_mae_table %>%
+    tidyr::pivot_longer(cols = c("RMSE", "MAE"), names_to = "Metric", values_to = "Value") %>%
+    ggplot(aes(x = factor(n), y = Value, fill = Metric)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "RMSE and MAE for Different n Values", x = "Top-N", y = "Value", fill = "Metric") +
+    theme_minimal()
+}
+
+# **6. Precision-Recall Tradeoff**
+if ("precision" %in% colnames(evaluation_results@results) & "recall" %in% colnames(evaluation_results@results)) {
+  precision_recall_data <- data.frame(precision = evaluation_results@results$precision,
+                                      recall = evaluation_results@results$recall,
+                                      k = c(1, 5, 10))
+  
+  ggplot(precision_recall_data, aes(x = recall, y = precision, color = factor(k))) +
+    geom_point(size = 4) +
+    geom_line() +
+    labs(title = "Precision-Recall Tradeoff", x = "Recall", y = "Precision", color = "k") +
+    theme_minimal()
+}
+
+# **7. Visualizing Popular Items Purchased (Bar Chart)**
+ggplot(popular_items, aes(x = reorder(Item.Purchased, -Purchase.Count), y = Purchase.Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Popular Items Purchased", x = "Item Purchased", y = "Count") +
+  theme_minimal() +
+  coord_flip()
+
+# **8. Visualizing Seasonal Purchases (Bar Chart)**
+ggplot(seasonal_data, aes(x = Season, y = Purchase.Count, fill = Season)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Purchases by Season", x = "Season", y = "Count") +
+  theme_minimal()
+
+# **Interactive Table with DT**
+datatable(popular_items, options = list(pageLength = 5, autoWidth = TRUE))
